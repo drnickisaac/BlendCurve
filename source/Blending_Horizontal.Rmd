@@ -1,0 +1,307 @@
+---
+title: "Horizontal Integration"
+author: "Nick Isaac"
+date: "2024-07-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(lme4)
+library(nimble)
+library(dplyr)
+library(ggmcmc)
+library(coda)
+```
+
+
+
+Read in the Expert Elicitation
+```{r}
+experts <- readRDS("data/Hymenoptera_experts_fertiliser_pesticide.rds")
+str(experts)
+```
+
+PLot the Expert data
+```{r}
+ggplot(data = experts, aes(x=Threat_intensity, y=1+Best_estimate)) +
+  geom_line(aes(col=factor(Expert))) +
+  facet_wrap(~Threat_response, scales = "free") +
+  geom_ribbon(aes(ymin=1+Lowest, ymax=1+Highest, fill = factor(Expert)), alpha=0.1) +
+  scale_y_log10() +
+  ylab("Abundance") +
+  theme_bw() +
+  ggtitle("Expert Elicitation")
+```
+
+Simple model of EE data
+```{r}
+emod <- lmer(log(1+Best_estimate) ~ poly(Threat_intensity,2) + (1|Expert), 
+             data = subset(experts, 
+                           Threat_response == "Agri & forest effluent PEST Ab"))
+#summary(emod)
+
+# replace with explicit poly terms
+emod2 <- lmer(log(1+Best_estimate) ~ Threat_intensity + I(Threat_intensity^2) + (1|Expert), 
+             data = subset(experts, 
+                           Threat_response == "Agri & forest effluent PEST Ab"))
+#summary(emod2)
+
+
+# simple linear model
+emod3 <- lmer(log(1+Best_estimate) ~ Threat_intensity + (1|Expert), 
+             data = subset(experts, 
+                           Threat_response == "Agri & forest effluent PEST Ab"))
+summary(emod3)
+```
+
+Explore fitted values
+```{r}
+
+```
+
+
+
+Read in the PREDICTS model estimates
+```{r}
+#predicts <- readRDS("data/Hymenoptera_PREDICTS_pesticide.rds")
+predicts <- readRDS("data/PREDICTS_plus_threats_byLU_scaled.rds")
+#str(predicts)
+```
+
+Plot the PREDICTS data
+```{r}
+ggplot(data = predicts, aes(x=pest_avg_kg_sqrt_RS, y=logAbundance)) +
+  geom_line(aes(col=SSB)) +
+  facet_wrap(~Predominant_habitat, scales = "free") +
+  theme_bw() +
+  ylab("Abundance") +
+  theme(legend.position = "none") +
+  ggtitle("PREDICTS")
+```
+Fit the PREDICTS model
+```{r}
+pmod <- lmer(logAbundance ~ poly(pest_avg_kg_sqrt_RS,2) + Predominant_habitat +
+               (1|SS) + (1|SSB), 
+             data = subset(predicts, !is.na(pest_avg_kg_sqrt_RS)))
+```
+
+# Edit
+```{r manipulate data}
+predicts2 <- predicts %>%
+  filter(!is.na(pest_avg_kg_sqrt_RS)) %>% 
+  dplyr::mutate(pest = (pest_avg_kg_sqrt_RS * 0.315872471538644 + 0.217945983339326)^2) %>% 
+  dplyr::mutate(pest = ifelse(pest < 0.00001, 0, pest)) %>%
+  dplyr::mutate(SS = as.numeric(SS)) %>%
+  dplyr::mutate(SSB = as.numeric(SSB)) %>%
+  select(SS, SSB,
+         Predominant_habitat,
+    logAbundance, 
+    pest)
+
+# need to convert Predominant_habitat into dummy variables
+
+experts2 <- experts %>%
+  filter(Threat_response == "Agri & forest effluent PEST Ab") %>%
+  #dplyr::mutate(logAbundance = log(1+Best_estimate)) %>%
+  #dplyr::filter(Expert == 2) %>% # temp to simplify data
+  dplyr::select(Threat_intensity,
+                Expert, Best_estimate)
+```
+
+
+```{r replot}
+ggplot(data = predicts2, aes(x=pest, y=logAbundance)) +
+  geom_line(aes(col=SSB)) +
+  facet_wrap(~Predominant_habitat, scales = "free") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggtitle("PREDICTS")
+
+ggplot(data = experts2, aes(x=Threat_intensity, y=1+Best_estimate)) +
+  geom_line(aes(col=factor(Expert))) +
+#  geom_ribbon(aes(ymin=1+Lowest, ymax=1+Highest, fill = factor(Expert)), alpha=0.1) +
+  theme_bw() +
+  scale_y_log10() +
+  ylab("Abundance") +
+  ggtitle("Expert Elicitation")
+```
+
+
+
+
+
+# Model
+Try a JL model. We have to model the two datasets in the same way. This is not ideal. PREDICTS data is typically transformed before use. 
+```{r defineModel}
+modelcode <- nimbleCode({ 
+  #### we fit a model with shared parameters 
+ if(runPredicts){ 
+  #### Predicts sub-model
+  for(i in 1:nP){
+    logN_P[i] <- alpha + beta1 * threat_P[i] + 
+      beta2 * threat_P[i]^2 +
+      eta1[SS[i]] + eta2[SSB[i]]
+       #gamma1 * Hab[i] # categories - need to code dummies
+  }
+ }
+  #### EE sub-model
+  for(j in 1:nE){
+    N_E[j] ~ dpois(e_N_E[j])
+    log(e_N_E[j]) <- alpha + beta1 * threat_E[j] + 
+      #beta2 * threat_E[j]^2 + 
+      eta3[Expert[j]]
+  }
+  
+  # random effects
+if(runPredicts){ 
+  for (k in 1:nSS) {eta1[k] ~ dnorm(0, sd = sigma1)}
+  for (k in 1:nSSB) {eta2[k] ~ dnorm(0, sd = sigma2)}
+}
+  for (k in 1:nExpert) {eta3[k] ~ dnorm(0, sd = sigma3)}
+  
+  # priors
+  #alpha ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy 
+  #alpha ~ dgamma(1, 1)
+  alpha ~ dnorm(3, tau = 1/2.71) 
+  beta1 ~ dnorm(0, tau = 1/2.71)
+  beta2 ~ dnorm(0, tau = 1/2.71)
+  
+  # hyperprior
+if(runPredicts){ 
+  sigma1 ~  T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  sigma2 ~  T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  }
+  sigma3 ~  T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+
+  })
+```
+
+
+
+Now fit the model for the Expert Elicitation only
+```{r runModel}
+runPredicts <- FALSE
+
+# step 1 create an operational from from NIMBLE/JAGS/BUGS code
+model <- nimbleModel(code = modelcode, 
+                     constants = list(nE = nrow(experts2),
+                                      nExpert = max(experts2$Expert),
+                                      threat_E = experts2$Threat_intensity,
+                                      Expert = experts2$Expert
+                     ),
+                     data = list(N_E = experts2$Best_estimate), 
+                     inits = list(alpha = runif(1, 2, 5),
+                                  beta1 = rnorm(1, 0, 1),
+                                  beta2 = rnorm(1, 0, 1),
+                                  sigma3 = rpois(1, 5))
+)
+#model$getVarNames()
+```
+
+
+```{r}
+#model$getNodeNames()
+model$initializeInfo()
+#model$plotGraph()
+#model$logProb_alpha
+```
+
+
+```{r}
+# step 2 build an MCMC object using buildMCMC(). we can add some customization here
+occMCMC <- buildMCMC(model, 
+                     monitors = c('alpha', 
+                                  "beta1",# "beta2",
+                                  #"sigma1", "sigma2", 
+                                  "sigma3"
+                                  ), 
+                     thin = 3, 
+                     useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
+#about 5 seconds
+
+# step 3 before compiling the MCMC object we need to compile the model first
+Cmodel <- compileNimble(model)
+# 25 seconds (less for fewer nodes)
+
+Cmodel$calculate() # if NA there is a problem
+
+# now the MCMC (project = NIMBLE model already associated with a project)
+CoccMCMC <- compileNimble(occMCMC, project = model)
+```
+
+Now run the model
+```{r}
+nit <- 3e6
+# and now we can use either $run or runMCMC() on the compiled model object.
+system.time(
+  runMCMC_samples <- runMCMC(CoccMCMC, 
+                             nburnin = round(nit*0.8), niter = nit, 
+                             nchains = 3, thin = 10,
+                             samplesAsCodaMCMC = T)
+) 
+```
+
+## Examine the model output
+Plot the MCMC traces
+```{r diagnoseModel, fig.height = 10, fig.width=7}
+plot1a <- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
+plot1b <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
+gridExtra::grid.arrange(plot1a, plot1b, ncol=2)
+```
+
+Simple summary statistics from IDM
+```{r}
+pars <- as.data.frame(summary(runMCMC_samples)$statistics)
+#pars$name <- rownames(pars)
+Rhat <- gelman.diag(runMCMC_samples)$psrf[,1]
+
+print(cbind(pars[,1:2], Rhat))
+```
+`alpha` is not converged unless niter is very large (>1e7). Might be easier if we centered the covariate on zero.
+
+
+from simple mixed effect model
+```{r}
+sd_RE <- as.numeric(VarCorr(emod3)[[1]])^(1/2)
+
+temp <- rbind(summary(emod3)$coef[,1:2],
+              c(sd_RE, NA))
+
+rownames(temp) <- c("alpha", "beta", "sigma3")
+print(as.data.frame(temp))
+```
+Parameter estimates are pretty close!
+
+# model with PREDICTS
+```{r runModel}
+runPredicts <- TRUE
+
+# step 1 create an operational from from NIMBLE/JAGS/BUGS code
+model <- nimbleModel(code = modelcode, 
+                     constants = list(nP = nrow(predicts2), 
+                                      nE = nrow(experts2),
+                                      nExpert = max(experts2$Expert),
+                                      nSS = max(predicts2$SS), # need to renumber from 1:n
+                                      nSSB = max(predicts2$SSB), # need to renumber from 1:n
+                                      threat_P = predicts2$pest[,1], # rescale!
+                                      threat_E = experts2$Threat_intensity,
+                                      #Hab = predicts2$Predominant_habitat,
+                                      Expert = experts2$Expert,
+                                      SS = predicts2$SS,
+                                      SSB = predicts2$SSB
+                     ),
+                     data = list(logN_P = predicts2$logAbundance, 
+                                 N_E = experts2$Best_estimate), 
+                     inits = list(alpha = runif(1, 2, 5),
+                                  beta1 = rnorm(1, 0, 1),
+                                  beta2 = rnorm(1, 0, 1),
+                                  sigma1 = rpois(1, 5),
+                                  sigma2 = rpois(1, 5),
+                                  sigma3 = rpois(1, 5))
+)
+#model$getVarNames()
+```
+
+Now repeat other steps ....
