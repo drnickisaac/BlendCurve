@@ -134,13 +134,16 @@ ggplot(data = experts2, aes(x=Threat_intensity, y=1+Best_estimate)) +
 
 # Model
 Try a JL model. We have to model the two datasets in the same way. This is not ideal. PREDICTS data is typically transformed before use. 
+
+We'll subtract 1 from the threat scores to help convergence and identifiability.
 ```{r defineModel}
 modelcode <- nimbleCode({ 
   #### we fit a model with shared parameters 
  if(runPredicts){ 
   #### Predicts sub-model
   for(i in 1:nP){
-    logN_P[i] <- alpha + beta1 * threat_P[i] + 
+    exp(logN_P[i]) ~ dpois(exp(e_N_P[i])
+    log(e_N_P[i]) <- alpha + beta1 * (threat_P[i]-1) + 
       beta2 * threat_P[i]^2 +
       eta1[SS[i]] + eta2[SSB[i]]
        #gamma1 * Hab[i] # categories - need to code dummies
@@ -149,7 +152,7 @@ modelcode <- nimbleCode({
   #### EE sub-model
   for(j in 1:nE){
     N_E[j] ~ dpois(e_N_E[j])
-    log(e_N_E[j]) <- alpha + beta1 * threat_E[j] + 
+    log(e_N_E[j]) <- alpha + beta1 * (threat_E[j]-1) + 
       #beta2 * threat_E[j]^2 + 
       eta3[Expert[j]]
   }
